@@ -1407,7 +1407,7 @@ static CXLRetCode cmd_dcd_get_dyn_cap_ext_list(const struct cxl_cmd *cmd,
  * Check whether any bit between addr[nr, nr+size) is set,
  * return true if any bit is set, otherwise return false
  */
-static bool test_any_bits_set(const unsigned long *addr, unsigned long nr,
+bool test_any_bits_set(const unsigned long *addr, unsigned long nr,
                               unsigned long size)
 {
     unsigned long res = find_next_bit(addr, size + nr, nr);
@@ -1446,7 +1446,7 @@ CXLDCRegion *cxl_find_dc_region(CXLType3Dev *ct3d, uint64_t dpa, uint64_t len)
     return NULL;
 }
 
-static void cxl_insert_extent_to_extent_list(CXLDCExtentList *list,
+void cxl_insert_extent_to_extent_list(CXLDCExtentList *list,
                                              uint64_t dpa,
                                              uint64_t len,
                                              uint8_t *tag,
@@ -1552,10 +1552,11 @@ static CXLRetCode cxl_dcd_add_dyn_cap_rsp_dry_run(CXLType3Dev *ct3d,
 
         range_init_nofail(&range1, dpa, len);
 
-        /*
-         * TODO: once the pending extent list is added, check against
-         * the list will be added here.
-         */
+        /* host-accepted DPA range must be contained by pending extent */
+        if (!cxl_extents_contains_dpa_range(&ct3d->dc.extents_pending,
+                                            dpa, len)) {
+            return CXL_MBOX_INVALID_PA;
+        }
 
         /* to-be-added range should not overlap with range already accepted */
         QTAILQ_FOREACH(ent, &ct3d->dc.extents, node) {
@@ -1585,9 +1586,13 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
     CXLDCExtentList *extent_list = &ct3d->dc.extents;
     uint32_t i;
     uint64_t dpa, len;
+    CXLDCExtent *ent;
     CXLRetCode ret;
 
     if (in->num_entries_updated == 0) {
+        /* Always remove the first pending extent when response received. */
+        ent = QTAILQ_FIRST(&ct3d->dc.extents_pending);
+        cxl_remove_extent_from_extent_list(&ct3d->dc.extents_pending, ent);
         return CXL_MBOX_SUCCESS;
     }
 
@@ -1604,6 +1609,8 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
 
     ret = cxl_dcd_add_dyn_cap_rsp_dry_run(ct3d, in);
     if (ret != CXL_MBOX_SUCCESS) {
+        ent = QTAILQ_FIRST(&ct3d->dc.extents_pending);
+        cxl_remove_extent_from_extent_list(&ct3d->dc.extents_pending, ent);
         return ret;
     }
 
@@ -1613,10 +1620,9 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
 
         cxl_insert_extent_to_extent_list(extent_list, dpa, len, NULL, 0);
         ct3d->dc.total_extent_count += 1;
-        /*
-         * TODO: we will add a pending extent list based on event log record
-         * and process the list according here.
-         */
+
+        ent = QTAILQ_FIRST(&ct3d->dc.extents_pending);
+        cxl_remove_extent_from_extent_list(&ct3d->dc.extents_pending, ent);
     }
 
     return CXL_MBOX_SUCCESS;
