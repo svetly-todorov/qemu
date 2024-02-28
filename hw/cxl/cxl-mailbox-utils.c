@@ -1674,6 +1674,12 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
         dpa = in->updated_entries[i].start_dpa;
         len = in->updated_entries[i].len;
 
+        /* Check if the DPA range is not fully backed with valid extents */
+        if (!ct3_test_region_block_backed(ct3d, dpa, len)) {
+            ret = CXL_MBOX_INVALID_PA;
+            goto free_and_exit;
+        }
+        /* After this point, extent overflow is the only error can happen */
         while (len > 0) {
             QTAILQ_FOREACH(ent, &tmp_list, node) {
                 range_init_nofail(&range, ent->start_dpa, ent->len);
@@ -1713,24 +1719,26 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
                             goto free_and_exit;
                         }
                     } else {
-                        /*
-                         * TODO: we reject the attempt to remove an extent
-                         * that overlaps with multiple extents in the device
-                         * for now, we will allow it once superset release
-                         * support is added.
-                         */
-                        ret = CXL_MBOX_INVALID_PA;
-                        goto free_and_exit;
+                        len1 = dpa - ent_start_dpa;
+                        len2 = 0;
+                        len_done = ent_len - len1 - len2;
+
+                        cxl_remove_extent_from_extent_list(&tmp_list, ent);
+                        cnt_delta--;
+                        if (len1) {
+                            cxl_insert_extent_to_extent_list(&tmp_list,
+                                                             ent_start_dpa,
+                                                             len1, NULL, 0);
+                            cnt_delta++;
+                        }
                     }
 
                     len -= len_done;
-                    /* len == 0 here until superset release is added */
+                    if (len) {
+                        dpa = ent_start_dpa + ent_len;
+                    }
                     break;
                 }
-            }
-            if (len) {
-                ret = CXL_MBOX_INVALID_PA;
-                goto free_and_exit;
             }
         }
     }
@@ -1819,10 +1827,9 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
                     }
 
                     len -= len_done;
-                    /*
-                     * len will always be 0 until superset release is add.
-                     * TODO: superset release will be added.
-                     */
+                    if (len > 0) {
+                        dpa = ent_start_dpa + ent_len;
+                    }
                     break;
                 }
             }
