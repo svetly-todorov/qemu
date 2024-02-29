@@ -87,3 +87,15 @@ void qmp_cxl_release_dynamic_capacity(const char *path, uint16_t hid,
 {
     error_setg(errp, "CXL Type 3 support is not compiled in");
 }
+
+void qmp_cxl_display_accepted_dc_extents(const char *path, const char *f,
+                                         Error **errp)
+{
+    error_setg(errp, "CXL Type 3 support is not compiled in");
+}
+
+void qmp_cxl_display_pending_to_add_dc_extents(const char *path, const char *f,
+                                               Error **errp)
+{
+    error_setg(errp, "CXL Type 3 support is not compiled in");
+}
