@@ -1960,6 +1960,14 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
         return;
     }
 
+    /* If this has extended validation (MHD), do that now */
+    if (dcd->dcd_validate_extents &&
+        !dcd->dcd_validate_extents(dcd, type, records, rid, errp)) {
+        return;
+    }
+
+    blk_bitmap = bitmap_new(dcd->dc.regions[rid].len / block_size);
+
     /* Create extent list for event being passed to host */
     i = 0;
     list = records;
@@ -2144,6 +2152,7 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->set_cacheline = set_cacheline;
     cvc->mhd_get_info = NULL;
     cvc->mhd_access_valid = NULL;
+    cvc->dcd_validate_extents = NULL;
 }
 
 static const TypeInfo ct3d_info = {
