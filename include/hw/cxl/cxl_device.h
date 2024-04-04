@@ -14,6 +14,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/register.h"
 #include "hw/cxl/cxl_events.h"
+#include "qapi/qapi-commands-cxl.h"
 
 /*
  * The following is how a CXL device's Memory Device registers are laid out.
@@ -424,6 +425,15 @@ typedef QLIST_HEAD(, CXLPoison) CXLPoisonList;
 
 #define DCD_MAX_NUM_REGION 8
 
+typedef enum CXLDCEventType {
+    DC_EVENT_ADD_CAPACITY = 0x0,
+    DC_EVENT_RELEASE_CAPACITY = 0x1,
+    DC_EVENT_FORCED_RELEASE_CAPACITY = 0x2,
+    DC_EVENT_REGION_CONFIG_UPDATED = 0x3,
+    DC_EVENT_ADD_CAPACITY_RSP = 0x4,
+    DC_EVENT_CAPACITY_RELEASED = 0x5,
+} CXLDCEventType;
+
 typedef struct CXLDCExtentRaw {
     uint64_t start_dpa;
     uint64_t len;
@@ -528,7 +538,7 @@ struct CXLType3Class {
                                size_t *len_out,
                                CXLCCI *cci);
     bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
-    bool (*dcd_validate_extents)(CXLType3Dev *dcd, CXLDCEventType type,
+    bool (*mhdcd_allocate_extents)(CXLType3Dev *dcd, CXLDCEventType type,
 		    CXLDCExtentRecordList *records, uint8_t rid, Error **errp);
 };
 
