@@ -5,7 +5,7 @@
  *
  */
 
-#include <sys/shm.h>
+#include <sys/file.h>
 #include "qemu/osdep.h"
 #include "hw/irq.h"
 #include "migration/vmstate.h"
@@ -16,6 +16,7 @@
 #include "hw/pci/pcie.h"
 #include "hw/pci/pcie_port.h"
 #include "hw/qdev-properties.h"
+#include "sysemu/hostmem.h"
 #include "mhsld.h"
 
 #define TYPE_CXL_MHSLD "cxl-mhsld"
@@ -68,47 +69,102 @@ static const struct cxl_cmd cxl_cmd_set_mhsld[256][256] = {
 
 static Property cxl_mhsld_props[] = {
     DEFINE_PROP_UINT32("mhd-head", CXLMHSLDState, mhd_head, ~(0)),
-    DEFINE_PROP_UINT32("mhd-shmid", CXLMHSLDState, mhd_shmid, 0),
+    DEFINE_PROP_STRING("mhd-state_file", CXLMHSLDState, mhd_state_file),
+    DEFINE_PROP_BOOL("mhd-init", CXLMHSLDState, mhd_init, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
 static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
 {
     CXLMHSLDState *s = CXL_MHSLD(pci_dev);
+    MemoryRegion *mr;
+    struct stat st;
+    int fd = -1;
+    size_t state_size;
+    size_t dc_size;
 
     ct3_realize(pci_dev, errp);
 
-    if (!s->mhd_shmid || s->mhd_head == ~(0)) {
-        error_setg(errp, "is_mhd requires mhd_shmid and mhd_head settings");
+    mr = host_memory_backend_get_memory(s->ct3d.dc.host_dc);
+    if (!mr)
+        return;
+    dc_size = memory_region_size(mr);
+    if (!dc_size) {
+        error_setg(errp, "MHSLD does not have dynamic capacity to manage");
         return;
     }
 
-    if (s->mhd_head >= 32) {
-        error_setg(errp, "MHD Head ID must be between 0-31");
-        return;
+    if (s->mhd_head >= MHSLD_HEADS) {
+        error_setg(errp, "MHD Head ID must be between 0-8");
+        goto cleanup_lock;
     }
 
-    s->mhd_state = shmat(s->mhd_shmid, NULL, 0);
-    if (s->mhd_state == (void *)-1) {
-        s->mhd_state = NULL;
-        error_setg(errp, "Unable to attach MHD State. Check ipcs is valid");
-        return;
+    /* Create or Open the MHD State file */
+    state_size = (dc_size / MHSLD_BLOCK_SZ) + sizeof(MHSLDSharedState);
+    if (s->mhd_init) {
+        fd = open(s->mhd_state_file, O_RDWR | O_CREAT, 0666);
+        if (fd == -1) {
+            error_setg(errp, "Failed to create mhd state file");
+            return;
+        }
+        if (ftruncate(fd, state_size) == -1) {
+            error_setg(errp, "Failed to set mhd state file size");
+            goto cleanup;
+        }
+    } else {
+        fd = open(s->mhd_state_file, O_RDWR);
+        if (fd == -1) {
+            error_setg(errp, "Failed to open mhd state file");
+            return;
+        }
+        if (fstat(fd, &st) == -1) {
+            error_setg(errp, "Failed to get mhd state file size");
+            goto cleanup;
+        }
+        if (st.st_size < state_size) {
+            error_setg(errp, "State file is too small to manage this device");
+            goto cleanup;
+        }
     }
 
-    /* For now, limit the number of LDs to the number of heads (SLD) */
-    if (s->mhd_head >= s->mhd_state->nr_heads) {
-        error_setg(errp, "Invalid head ID for multiheaded device.");
-        return;
+    /* map the state and initialize it as needed */
+    s->mhd_state_fd = fd;
+    s->mhd_state_size = state_size;
+    s->mhd_state = mmap(NULL, state_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (s->mhd_state == MAP_FAILED) {
+        error_setg(errp, "Failed to mmap mhd state file");
+        goto cleanup;
     }
 
-    if (s->mhd_state->nr_lds <= s->mhd_head) {
-        error_setg(errp, "MHD Shared state does not have sufficient lds.");
-        return;
+    /* Acquire the state region for modification */
+    if (flock(s->mhd_state_fd, LOCK_EX) == -1) {
+        error_setg(errp, "Failed to acquire exclusive lock on mhd state file");
+        goto cleanup_unmap;
     }
 
+    /* If this is initializing the system, completely reset the mhd state file */
+    if (s->mhd_init) {
+        memset(s->mhd_state, 0, s->mhd_state_size);
+        s->mhd_state->nr_heads = MHSLD_HEADS;
+        s->mhd_state->nr_lds = MHSLD_HEADS;
+        s->mhd_state->nr_blocks = dc_size / MHSLD_BLOCK_SZ;
+    }
+
+    /* Set the LD ownership for this head to this system */
     s->mhd_state->ldmap[s->mhd_head] = s->mhd_head;
+    msync(s->mhd_state, s->mhd_state_size, MS_SYNC);
+    flock(s->mhd_state_fd, LOCK_UN);
     return;
+
+cleanup_lock:
+    flock(s->mhd_state_fd, LOCK_UN);
+cleanup_unmap:
+    munmap(s->mhd_state, s->mhd_state_size);
+cleanup:
+    if (fd != -1)
+        close(fd);
 }
+
 
 static void cxl_mhsld_exit(PCIDevice *pci_dev)
 {
@@ -116,17 +172,31 @@ static void cxl_mhsld_exit(PCIDevice *pci_dev)
 
     ct3_exit(pci_dev);
 
-    if (s->mhd_state) {
-        shmdt(s->mhd_state);
+    if (s->mhd_state_fd) {
+        munmap(s->mhd_state, s->mhd_state_size);
+        close(s->mhd_state_fd);
+        s->mhd_state = NULL;
     }
 }
 
 static void cxl_mhsld_reset(DeviceState *d)
 {
     CXLMHSLDState *s = CXL_MHSLD(d);
+    size_t blocks, i;
 
     ct3d_reset(d);
     cxl_add_cci_commands(&s->ct3d.cci, cxl_cmd_set_mhsld, 512);
+
+    /*
+     * Scan s->mhd_state->blocks for any byte with bit s->mhd_head set,
+     * and clear it (release the capacity)
+     */
+    flock(s->mhd_state_fd, LOCK_EX);
+    blocks = s->mhd_state->nr_blocks;
+    for (i = 0; i < blocks; i++)
+        s->mhd_state->blocks[i] &= ~(1 << s->mhd_head);
+    msync(s->mhd_state, s->mhd_state_size, MS_SYNC);
+    flock(s->mhd_state_fd, LOCK_UN);
 }
 
 /* TODO: Implement shared device hooks
@@ -152,7 +222,7 @@ static void cxl_mhsld_class_init(ObjectClass *klass, void *data)
     /* TODO: type3 class callbacks for multi-host access validation
      * CXLType3Class *cvc = CXL_TYPE3_CLASS(klass);
      * cvc->mhd_access_valid = mhsld_access_valid;
-     * cvc->dcd_extent_action = mhsld_dcd_extent_action;
+     * cvc->mhdcd_allocate_extents = mhdcd_allocate_extents;
      */
 }
 

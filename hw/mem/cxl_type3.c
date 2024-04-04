@@ -1800,15 +1800,6 @@ static const QemuUUID dynamic_capacity_uuid = {
                  0x95, 0x26, 0x8e, 0x10, 0x1a, 0x2a),
 };
 
-typedef enum CXLDCEventType {
-    DC_EVENT_ADD_CAPACITY = 0x0,
-    DC_EVENT_RELEASE_CAPACITY = 0x1,
-    DC_EVENT_FORCED_RELEASE_CAPACITY = 0x2,
-    DC_EVENT_REGION_CONFIG_UPDATED = 0x3,
-    DC_EVENT_ADD_CAPACITY_RSP = 0x4,
-    DC_EVENT_CAPACITY_RELEASED = 0x5,
-} CXLDCEventType;
-
 /*
  * Check whether the range [dpa, dpa + len -1] has overlaps with extents in
  * the list.
@@ -1874,6 +1865,7 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
     CXLEventDynamicCapacity dCap = {};
     CXLEventRecordHdr *hdr = &dCap.hdr;
     CXLType3Dev *dcd;
+    CXLType3Class *cvc;
     uint8_t flags = 1 << CXL_EVENT_TYPE_INFO;
     uint32_t num_extents = 0;
     CXLDCExtentRecordList *list;
@@ -1890,6 +1882,7 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
     }
 
     dcd = CXL_TYPE3(obj);
+    cvc = CXL_TYPE3_GET_CLASS(dcd);
     if (!dcd->dc.num_regions) {
         error_setg(errp, "No dynamic capacity support from the device");
         return;
@@ -1961,8 +1954,8 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
     }
 
     /* If this has extended validation (MHD), do that now */
-    if (dcd->dcd_validate_extents &&
-        !dcd->dcd_validate_extents(dcd, type, records, rid, errp)) {
+    if (cvc->mhdcd_allocate_extents &&
+        !cvc->mhdcd_allocate_extents(dcd, type, records, rid, errp)) {
         return;
     }
 
@@ -2152,7 +2145,7 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->set_cacheline = set_cacheline;
     cvc->mhd_get_info = NULL;
     cvc->mhd_access_valid = NULL;
-    cvc->dcd_validate_extents = NULL;
+    cvc->mhdcd_allocate_extents = NULL;
 }
 
 static const TypeInfo ct3d_info = {

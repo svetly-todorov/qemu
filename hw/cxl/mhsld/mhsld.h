@@ -13,7 +13,15 @@
 #include "hw/cxl/cxl_device.h"
 #include "qemu/units.h"
 
-#define MHSLD_MIN_MEMBLK (128 * MiB)
+#define MHSLD_BLOCK_SZ (2 * MiB)
+
+/*
+ * We limit the number of heads to prevent the shared state
+ * region from becoming a major memory hog.  We need 512MB of
+ * memory space to track 8-host ownership of 4GB of memory in
+ * blocks of 2MB.  This can change if the block size is increased.
+ */
+#define MHSLD_HEADS  (8)
 
 /*
  * The shared state cannot have 2 variable sized regions
@@ -22,15 +30,18 @@
 typedef struct MHSLDSharedState {
     uint8_t nr_heads;
     uint8_t nr_lds;
-    uint8_t ldmap[65536];
-    /* TODO: shared state Mutex */
-    /* TODO: Extent information */
+    uint8_t ldmap[MHSLD_HEADS];
+    uint64_t nr_blocks;
+    uint8_t blocks[];
 } MHSLDSharedState;
 
 struct CXLMHSLDState {
     CXLType3Dev ct3d;
+    bool mhd_init;
+    char *mhd_state_file;
+    int mhd_state_fd;
+    size_t mhd_state_size;
     uint32_t mhd_head;
-    uint32_t mhd_shmid;
     MHSLDSharedState *mhd_state;
 };
 
