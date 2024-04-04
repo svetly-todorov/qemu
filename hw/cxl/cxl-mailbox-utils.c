@@ -1605,6 +1605,11 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
         return CXL_MBOX_RESOURCES_EXHAUSTED;
     }
 
+
+
+    /********** MHSLD TODO: HOOK FOR BIT ACCOUNTING SOMEWHERE IN THIS FUNCTION ********/
+
+
     ret = cxl_detect_malformed_extent_list(ct3d, in);
     if (ret != CXL_MBOX_SUCCESS) {
         return ret;
@@ -1784,6 +1789,8 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
     if (ret != CXL_MBOX_SUCCESS) {
         return ret;
     }
+
+    /********** MHSLD TODO: HOOK FOR BIT ACCOUNTING SOMEWHERE IN THIS FUNCTION ********/
 
     /* From this point, all the extents to release are valid */
     for (i = 0; i < in->num_entries_updated; i++) {
