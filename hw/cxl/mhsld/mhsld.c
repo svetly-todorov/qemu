@@ -190,6 +190,13 @@ static void cxl_mhsld_exit(PCIDevice *pci_dev)
  *
  */
 
+/*
+ * mhdcd_deallocate_extents:
+ * 1. acquire flock(EX)
+ * 2. for the extents described, clear the bits in those blocks for this head id
+ * 3. release flock(UN)
+ */
+
 static void cxl_mhsld_reset(DeviceState *d)
 {
     CXLMHSLDState *s = CXL_MHSLD(d);
@@ -234,6 +241,7 @@ static void cxl_mhsld_class_init(ObjectClass *klass, void *data)
      * CXLType3Class *cvc = CXL_TYPE3_CLASS(klass);
      * cvc->mhd_access_valid = mhsld_access_valid;
      * cvc->mhdcd_allocate_extents = mhdcd_allocate_extents;
+     * cvc->mhdcd_deallocate_extents = mhdcd_deallocate_extents;
      */
 }
 

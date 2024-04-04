@@ -2146,6 +2146,7 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->mhd_get_info = NULL;
     cvc->mhd_access_valid = NULL;
     cvc->mhdcd_allocate_extents = NULL;
+    /* cvc->mhdcd_deallocate_extents = NULL; */
 }
 
 static const TypeInfo ct3d_info = {

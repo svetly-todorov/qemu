@@ -540,6 +540,9 @@ struct CXLType3Class {
     bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
     bool (*mhdcd_allocate_extents)(CXLType3Dev *dcd, CXLDCEventType type,
 		    CXLDCExtentRecordList *records, uint8_t rid, Error **errp);
+    /*
+    void (*mhdcd_deallocate_extents)(...);
+    */
 };
 
 struct CSWMBCCIDev {
