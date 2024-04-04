@@ -95,7 +95,7 @@ static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
     }
 
     if (s->mhd_head >= MHSLD_HEADS) {
-        error_setg(errp, "MHD Head ID must be between 0-8");
+        error_setg(errp, "MHD Head ID must be between 0-7");
         goto cleanup_lock;
     }
 
@@ -178,6 +178,17 @@ static void cxl_mhsld_exit(PCIDevice *pci_dev)
         s->mhd_state = NULL;
     }
 }
+
+/*
+ * mhdcd_allocate_extents:
+ *
+ * 1. acquire flock(EX)
+ * 2. for the extent requested, check whether all the bits in blocks are free
+ *    a. if not, then return an error
+ * 3. set the bit for all blocks belonging to the extent for this head id
+ * 4. release flock(UN)
+ *
+ */
 
 static void cxl_mhsld_reset(DeviceState *d)
 {
