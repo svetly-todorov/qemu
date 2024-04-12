@@ -461,6 +461,7 @@ typedef struct CXLDCRegion {
     uint32_t dsmadhandle;
     uint8_t flags;
     unsigned long *blk_bitmap;
+    uint32_t *blk_hostmap;
 } CXLDCRegion;
 
 struct CXLType3Dev {
@@ -509,6 +510,7 @@ struct CXLType3Dev {
         uint32_t total_extent_count;
         uint32_t ext_list_gen_seq;
 
+        uint8_t head;
         uint8_t num_regions; /* 0-8 regions */
         CXLDCRegion regions[DCD_MAX_NUM_REGION];
     } dc;

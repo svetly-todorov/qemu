@@ -620,6 +620,79 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     }
 }
 
+static int cxl_open_dc_state(uint64_t sn, int flags) {
+    char name[128];
+    snprintf(name, sizeof(name), "/dcd_%lu", sn);
+    return shm_open(name, flags, 0666);
+}
+
+static bool cxl_create_dc_state(uint64_t sn, size_t nblocks) {
+    int fd, rc;
+    size_t size = 4096;
+    
+    fd = cxl_open_dc_state(sn, O_WRONLY | O_CREAT);
+    if (fd == -1)
+        return false;
+    
+    size += nblocks * sizeof(uint32_t);
+    
+    rc = ftruncate(fd, size);
+    close(fd);
+
+    if (rc)
+        return false;
+
+    return true;
+}
+
+static uint32_t *cxl_map_dc_state(uint64_t sn, size_t nblocks) {
+    int fd;
+    void *map;
+    size_t size;
+
+    fd = cxl_open_dc_state(sn, O_RDWR);
+    if (fd == -1)
+        return NULL;
+
+    size = nblocks * sizeof(uint32_t);
+
+    /*
+     * Keep the header page for mhd info -- dcd only
+     * needs to know about block metadata, stored afterwards
+     */
+    map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 4096);
+    close(fd);
+
+    if (map == MAP_FAILED)
+        return NULL;
+
+    return (uint32_t *)map;
+}
+
+static void cxl_set_dc_state(CXLType3Dev *ct3d,
+                             CXLDCRegion *region,
+                             size_t start_block,
+                             size_t nblocks)
+{
+    if (!region->blk_hostmap)
+        return;
+
+    for (size_t i = 0; i < nblocks; ++i)
+        region->blk_hostmap[start_block + i] |= (1u << ct3d->dc.head);
+}
+
+static void cxl_clear_dc_state(CXLType3Dev *ct3d,
+                               CXLDCRegion *region,
+                               size_t start_block,
+                               size_t nblocks)
+{
+    if (!region->blk_hostmap)
+        return;
+
+    for (size_t i = 0; i < nblocks; ++i)
+        region->blk_hostmap[start_block + i] &= ~(1u << ct3d->dc.head);
+}
+
 /*
  * TODO: dc region configuration will be updated once host backend and address
  * space support is added for DCD.
@@ -633,7 +706,9 @@ static bool cxl_create_dc_regions(CXLType3Dev *ct3d, Error **errp)
     uint64_t blk_size = 2 * MiB;
     CXLDCRegion *region;
     MemoryRegion *mr;
+    uint32_t *hostmap;
     uint64_t dc_size;
+    uint64_t dc_blks = 0;
 
     mr = host_memory_backend_get_memory(ct3d->dc.host_dc);
     dc_size = memory_region_size(mr);
@@ -673,7 +748,28 @@ static bool cxl_create_dc_regions(CXLType3Dev *ct3d, Error **errp)
         };
         ct3d->dc.total_capacity += region->len;
         region->blk_bitmap = bitmap_new(region->len / region->block_size);
+        dc_blks += region->len / region->block_size;
     }
+
+    /* Create/open host map file, truncating if necessary */
+    if (!cxl_create_dc_state(ct3d->sn, dc_blks)) {
+        error_setg(errp, "failed to create host state errno %d", errno);
+        return false;
+    }
+    
+    /* Wire region->blk_hostmaps into the shared hostid bytemap */
+    hostmap = cxl_map_dc_state(ct3d->sn, dc_blks);
+    if (!hostmap) {
+        error_setg(errp, "failed to mmap host state errno %d", errno);
+        return false;
+    }
+    for (i = 0, region = &ct3d->dc.regions[0], region_base = 0;
+         i < ct3d->dc.num_regions;
+         i++, region++) {
+        region->blk_hostmap = &hostmap[region_base];
+        region_base += region->len / region->block_size;
+    }
+
     QTAILQ_INIT(&ct3d->dc.extents);
     QTAILQ_INIT(&ct3d->dc.extents_pending);
 
@@ -697,6 +793,7 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     for (i = 0; i < ct3d->dc.num_regions; i++) {
         region = &ct3d->dc.regions[i];
         g_free(region->blk_bitmap);
+        cxl_clear_dc_state(ct3d, region, 0, region->len / region->block_size);
     }
 }
 
@@ -770,6 +867,7 @@ static bool cxl_setup_memory(CXLType3Dev *ct3d, Error **errp)
     }
 
     ct3d->dc.total_capacity = 0;
+    ct3d->dc.head = 0;
     if (ct3d->dc.num_regions) {
         MemoryRegion *dc_mr;
         char *dc_name;
@@ -801,7 +899,11 @@ static bool cxl_setup_memory(CXLType3Dev *ct3d, Error **errp)
         g_free(dc_name);
 
         if (!cxl_create_dc_regions(ct3d, errp)) {
-            error_setg(errp, "setup DC regions failed");
+            /*
+             * CANNOT set errp here because all the failure states of
+             * cxl_create_dc_regions already fill it out with an error message.
+             */
+            // error_setg(errp, "setup DC regions failed");
             return false;
         }
     }
@@ -945,6 +1047,9 @@ void ct3_set_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
 
     bitmap_set(region->blk_bitmap, (dpa - region->base) / region->block_size,
                len / region->block_size);
+
+    cxl_set_dc_state(ct3d, region, (dpa - region->base) / region->block_size,
+                     len / region->block_size);
 }
 
 /*
@@ -957,6 +1062,7 @@ bool ct3_test_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
     CXLDCRegion *region;
     uint64_t nbits;
     long nr;
+    size_t i;
 
     region = cxl_find_dc_region(ct3d, dpa, len);
     if (!region) {
@@ -969,7 +1075,13 @@ bool ct3_test_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
      * if bits between [dpa, dpa + len) are all 1s, meaning the DPA range is
      * backed with DC extents, return true; else return false.
      */
-    return find_next_zero_bit(region->blk_bitmap, nr + nbits, nr) == nr + nbits;
+    // return find_next_zero_bit(region->blk_bitmap, nr + nbits, nr) == nr + nbits;
+
+    for (i = nr; i < nr + nbits; ++i)
+        if (region->blk_hostmap[i] != ct3d->dc.head)
+            return false;
+
+    return true;
 }
 
 /*
@@ -991,6 +1103,8 @@ void ct3_clear_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
     nr = (dpa - region->base) / region->block_size;
     nbits = len / region->block_size;
     bitmap_clear(region->blk_bitmap, nr, nbits);
+
+    cxl_clear_dc_state(ct3d, region, nr, nbits);
 }
 
 static bool cxl_type3_dpa(CXLType3Dev *ct3d, hwaddr host_addr, uint64_t *dpa)
