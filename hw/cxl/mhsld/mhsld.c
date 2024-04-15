@@ -74,16 +74,168 @@ static Property cxl_mhsld_props[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static int cxl_mhsld_state_open(uint64_t sn, int flags) {
+static int cxl_mhsld_state_open(const char *filename, int flags) {
     char name[128];
-    snprintf(name, sizeof(name), "/dcd_%lu", sn);
+    snprintf(name, sizeof(name), "/%s", filename);
     return shm_open(name, flags, 0666);
 }
 
-static int cxl_mhsld_state_unlink(uint64_t sn) {
+static int cxl_mhsld_state_unlink(const char *filename) {
     char name[128];
-    snprintf(name, sizeof(name), "/dcd_%lu", sn);
+    snprintf(name, sizeof(name), "/%s", filename);
     return shm_unlink(name);
+}
+
+static int cxl_mhsld_state_create(const char *filename, size_t size) {
+    int fd, rc;
+
+    fd = cxl_mhsld_state_open(filename, O_RDWR | O_CREAT);
+    if (fd == -1)
+        return -1;
+
+    rc = ftruncate(fd, size);
+
+    if (rc) {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static void cxl_mhsld_state_initialize(CXLMHSLDState *s, size_t dc_size) {
+    if (!s->mhd_init)
+        return;
+
+    memset(s->mhd_state, 0, s->mhd_state_size);
+    s->mhd_state->nr_heads = MHSLD_HEADS;
+    s->mhd_state->nr_lds = MHSLD_HEADS;
+    s->mhd_state->nr_blocks = dc_size / MHSLD_BLOCK_SZ;
+}
+
+static MHSLDSharedState *cxl_mhsld_state_map(CXLMHSLDState *s) {
+    void *map;
+    size_t size = s->mhd_state_size;
+    int fd = s->mhd_state_fd;
+
+    if (fd < 0)
+        return NULL;
+
+    map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED)
+        return NULL;
+
+    return (MHSLDSharedState *)map;
+}
+
+static bool cxl_mhsld_state_set(CXLMHSLDState *s,
+                                size_t block_start,
+                                size_t block_count)
+{
+    uint8_t prev, *block;
+    size_t i;
+    bool fail = false;
+
+    /*
+     * Try to claim all extents from start -> start + count;
+     * break early if a claimed extent is encountered
+     */
+    for (i = 0; i < block_count; ++i) {
+        block = &s->mhd_state->blocks[block_start + i];
+        prev = __sync_val_compare_and_swap(block, 0, (1 << s->mhd_head));
+        if (prev != 0) {
+            fail = true;
+            break;
+        }
+    }
+
+    if (!fail)
+        return true;
+
+    /* Roll back incomplete claims */
+    for (;; --i) {
+        block = &s->mhd_state->blocks[block_start + i];
+        __sync_fetch_and_and(block, ~(1u << s->mhd_head));
+        if (i == 0)
+            break;
+    }
+
+    return false;
+}
+
+static void cxl_mhsld_state_clear(CXLMHSLDState *s,
+                                  size_t block_start,
+                                  size_t block_count)
+{
+    size_t i;
+    uint8_t *block;
+
+    for (i = 0; i < block_count; ++i) {
+        block = &s->mhd_state->blocks[block_start + i];
+        __sync_fetch_and_and(block, ~(1u << s->mhd_head));
+    }
+}
+
+static bool cxl_mhsld_access_valid(PCIDevice *d, uint64_t addr, unsigned int size) {
+    return true;
+}
+
+/*
+ * Triggered during an add_capacity command to a CXL device:
+ * takes a list of extent records and preallocates them,
+ * in anticipation of a "dcd accept" response from the host.
+ *
+ * Extents that are not accepted by the host will be rolled
+ * back later.
+ */
+static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
+                                                CXLDCExtentRecordList *records,
+                                                CXLDCRegion *region) {
+    uint64_t offset, len, dpa;
+    bool rc;
+
+    CXLMHSLDState *s = CXL_MHSLD(pci_dev);
+    CXLDCExtentRecordList *list = records, *rollback = NULL;
+
+    for (; list; list = list->next) {
+        offset = list->value->offset;
+        len = list->value->len;
+        dpa = offset + region->base;
+
+        /*
+         * The start-block calculation fails if regions have variable
+         * block sizes -- we'd need to track region->start_block_idx
+         * explicitly, and calculate offset/len relative to that.
+         */
+        rc = cxl_mhsld_state_set(s, (dpa - region->base) / region->block_size,
+                                 len / region->block_size);
+
+        if (!rc) {
+            rollback = records;
+            break;
+        }
+    }
+
+    /* Setting the mhd state failed. Roll back the extents that were added */
+    for (; rollback; rollback = rollback->next) {
+        offset = rollback->value->offset;
+        len = rollback->value->len;
+        dpa = offset + region->base;
+
+        cxl_mhsld_state_clear(s, (dpa - region->base) / region->block_size,
+                              len / region->block_size);
+
+        if (rollback == list)
+            return false;
+    }
+
+    return true;
+}
+
+static bool cxl_mhsld_release_extents_in_region(PCIDevice *pci_dev,
+                                                CXLDCExtentRecordList *list,
+                                                CXLDCRegion *region) {
+    return false;
 }
 
 static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
@@ -91,17 +243,11 @@ static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
     CXLMHSLDState *s = CXL_MHSLD(pci_dev);
     MemoryRegion *mr;
     int fd = -1;
-    int state_flags = O_RDWR;
-    size_t state_size;
     size_t dc_size;
 
     ct3_realize(pci_dev, errp);
 
-    if (s->mhd_init)
-        state_flags |= O_CREAT;
-
-    fd = cxl_mhsld_state_open(state_flags, s->ct3d.sn);
-
+    /* Get number of blocks from dcd size */
     mr = host_memory_backend_get_memory(s->ct3d.dc.host_dc);
     if (!mr)
         return;
@@ -111,37 +257,41 @@ static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
+    s->mhd_state_size = (dc_size / MHSLD_BLOCK_SZ) + MHSLD_HEADER_SZ;
+
+    /* Sanity check the head idx */
     if (s->mhd_head >= MHSLD_HEADS) {
         error_setg(errp, "MHD Head ID must be between 0-7");
-        goto cleanup;
+        return;
     }
 
-    /* map the state and initialize it as needed */
-    state_size = (dc_size / MHSLD_BLOCK_SZ) + MHSLD_HEADER_SZ;
+    /* Create the state file if this is the 'mhd_init' instance */
+    if (s->mhd_init)
+        fd = cxl_mhsld_state_create(s->mhd_state_file, s->mhd_state_size);
+    else
+        fd = cxl_mhsld_state_open(s->mhd_state_file, O_RDWR);
+
+    if (fd < 0) {
+        error_setg(errp, "failed to open mhsld state errno %d", errno);
+        return;
+    }
+
     s->mhd_state_fd = fd;
-    s->mhd_state_size = state_size;
-    s->mhd_state = mmap(NULL, state_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (s->mhd_state == MAP_FAILED) {
+
+    /* Map the state and initialize it as needed */
+    s->mhd_state = cxl_mhsld_state_map(s);
+    if (!s->mhd_state) {
         error_setg(errp, "Failed to mmap mhd state file");
-        goto cleanup;
+        close(fd);
+        cxl_mhsld_state_unlink(s->mhd_state_file);
+        return;
     }
 
-    /* If this is initializing the system, completely reset the mhd state file */
-    if (s->mhd_init) {
-        memset(s->mhd_state, 0, s->mhd_state_size);
-        s->mhd_state->nr_heads = MHSLD_HEADS;
-        s->mhd_state->nr_lds = MHSLD_HEADS;
-        s->mhd_state->nr_blocks = dc_size / MHSLD_BLOCK_SZ;
-    }
+    cxl_mhsld_state_initialize(s, dc_size);
 
     /* Set the LD ownership for this head to this system */
     s->mhd_state->ldmap[s->mhd_head] = s->mhd_head;
     return;
-
-cleanup:
-    cxl_mhsld_state_unlink(s->ct3d.sn);
-    if (fd != -1)
-        close(fd);
 }
 
 
@@ -154,7 +304,7 @@ static void cxl_mhsld_exit(PCIDevice *pci_dev)
     if (s->mhd_state_fd) {
         munmap(s->mhd_state, s->mhd_state_size);
         close(s->mhd_state_fd);
-        cxl_mhsld_state_unlink(s->ct3d.sn);
+        cxl_mhsld_state_unlink(s->mhd_state_file);
         s->mhd_state = NULL;
     }
 }
@@ -200,9 +350,11 @@ static void cxl_mhsld_class_init(ObjectClass *klass, void *data)
      * CXLType3Class *cvc = CXL_TYPE3_CLASS(klass);
      * cvc->mhd_access_valid = mhsld_access_valid;
      */
-    // CXLType3Class *cvc = CXL_TYPE3_CLASS(klass);
-    // cvc->mhdcd_allocate_extents = cxl_mhsld_allocate_extents;
-    // cvc->mhdcd_deallocate_extents = cxl_mhsld_deallocate_extents;    
+    CXLType3Class *cvc = CXL_TYPE3_CLASS(klass);
+    cvc->mhd_get_info = cmd_mhd_get_info;
+    cvc->mhd_access_valid = cxl_mhsld_access_valid;
+    cvc->mhd_reserve_extents_in_region = cxl_mhsld_reserve_extents_in_region;
+    cvc->mhd_release_extents_in_region = cxl_mhsld_release_extents_in_region;
 }
 
 static const TypeInfo cxl_mhsld_info = {

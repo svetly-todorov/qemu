@@ -620,98 +620,10 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     }
 }
 
-static int cxl_mhd_open_state(uint64_t sn, int flags) {
-    char name[128];
-    snprintf(name, sizeof(name), "/dcd_%lu", sn);
-    return shm_open(name, flags, 0666);
-}
-
 static int cxl_mhd_unlink_state(uint64_t sn) {
     char name[128];
     snprintf(name, sizeof(name), "/dcd_%lu", sn);
     return shm_unlink(name);
-}
-
-static bool cxl_mhd_create_state(uint64_t sn, size_t nblocks) {
-    int fd, rc;
-    size_t size = 4096;
-    
-    fd = cxl_mhd_open_state(sn, O_WRONLY | O_CREAT);
-    if (fd == -1)
-        return false;
-    
-    size += nblocks * sizeof(uint8_t);
-    
-    rc = ftruncate(fd, size);
-    close(fd);
-
-    if (rc)
-        return false;
-
-    return true;
-}
-
-static uint8_t *cxl_mhd_map_state(uint64_t sn, size_t nblocks) {
-    int fd;
-    void *map;
-    size_t size;
-
-    fd = cxl_mhd_open_state(sn, O_RDWR);
-    if (fd == -1)
-        return NULL;
-
-    size = nblocks * sizeof(uint8_t);
-
-    /*
-     * Keep the header page for mhd info -- dcd only
-     * needs to know about block metadata, stored afterwards
-     */
-    map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 4096);
-    close(fd);
-
-    if (map == MAP_FAILED)
-        return NULL;
-
-    return (uint8_t *)map;
-}
-
-static bool cxl_mhd_set_state(CXLType3Dev *ct3d,
-                             CXLDCRegion *region,
-                             size_t start_block,
-                             size_t nblocks)
-{
-    if (!region->blk_hostmap)
-        return false;
-
-    uint8_t prev, *section;
-    size_t i;
-    bool fail = false;
-
-    /*
-     * Try to claim all extents from start -> start + nblocks;
-     * break early if a claimed extent is encountered
-     */
-    for (i = 0; i < nblocks; ++i) {
-        section = &region->blk_hostmap[start_block + i];
-        prev = __sync_val_compare_and_swap(section, 0, (1 << ct3d->dc.head));
-        if (prev != 0) {
-            fail = true;
-            break;
-        }
-    }
-
-    if (!fail)
-        return true;
-    
-    /* Roll back incomplete claims */
-    for (;; --i) {
-        section = &region->blk_hostmap[start_block + i];
-        __sync_fetch_and_and(section, ~(1u << ct3d->dc.head));
-        if (i == 0)
-            break;
-    }
-
-    return false;
 }
 
 static void cxl_mhd_clear_state(CXLType3Dev *ct3d,
@@ -739,7 +651,6 @@ static bool cxl_create_dc_regions(CXLType3Dev *ct3d, Error **errp)
     uint64_t blk_size = 2 * MiB;
     CXLDCRegion *region;
     MemoryRegion *mr;
-    uint8_t *hostmap;
     uint64_t dc_size;
     uint64_t dc_blks = 0;
 
@@ -782,25 +693,6 @@ static bool cxl_create_dc_regions(CXLType3Dev *ct3d, Error **errp)
         ct3d->dc.total_capacity += region->len;
         region->blk_bitmap = bitmap_new(region->len / region->block_size);
         dc_blks += region->len / region->block_size;
-    }
-
-    /* Create/open host map file, truncating if necessary */
-    if (!cxl_mhd_create_state(ct3d->sn, dc_blks)) {
-        error_setg(errp, "failed to create host state errno %d", errno);
-        return false;
-    }
-    
-    /* Wire region->blk_hostmaps into the shared hostid bytemap */
-    hostmap = cxl_mhd_map_state(ct3d->sn, dc_blks);
-    if (!hostmap) {
-        error_setg(errp, "failed to mmap host state errno %d", errno);
-        return false;
-    }
-    for (i = 0, region = &ct3d->dc.regions[0], region_base = 0;
-         i < ct3d->dc.num_regions;
-         i++, region++) {
-        region->blk_hostmap = &hostmap[region_base];
-        region_base += region->len / region->block_size;
     }
 
     QTAILQ_INIT(&ct3d->dc.extents);
@@ -1093,7 +985,6 @@ bool ct3_test_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
     CXLDCRegion *region;
     uint64_t nbits;
     long nr;
-    size_t i;
 
     region = cxl_find_dc_region(ct3d, dpa, len);
     if (!region) {
@@ -1106,13 +997,7 @@ bool ct3_test_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
      * if bits between [dpa, dpa + len) are all 1s, meaning the DPA range is
      * backed with DC extents, return true; else return false.
      */
-    // return find_next_zero_bit(region->blk_bitmap, nr + nbits, nr) == nr + nbits;
-
-    for (i = nr; i < nr + nbits; ++i)
-        if (region->blk_hostmap[i] != ct3d->dc.head)
-            return false;
-
-    return true;
+    return find_next_zero_bit(region->blk_bitmap, nr + nbits, nr) == nr + nbits;
 }
 
 /*
@@ -2010,10 +1895,11 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
     CXLEventDynamicCapacity dCap = {};
     CXLEventRecordHdr *hdr = &dCap.hdr;
     CXLType3Dev *dcd;
+    CXLType3Class *cvc;
     uint8_t flags = 1 << CXL_EVENT_TYPE_INFO;
     uint32_t num_extents = 0;
     CXLDCRegion *region;
-    CXLDCExtentRecordList *list, *rollback = NULL;
+    CXLDCExtentRecordList *list;
     g_autofree CXLDCExtentRaw *extents = NULL;
     uint8_t enc_log;
     uint64_t dpa, offset, len, block_size;
@@ -2027,6 +1913,7 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
     }
 
     dcd = CXL_TYPE3(obj);
+    cvc = CXL_TYPE3_GET_CLASS(dcd);
     if (!dcd->dc.num_regions) {
         error_setg(errp, "No dynamic capacity support from the device");
         return;
@@ -2102,41 +1989,11 @@ static void qmp_cxl_process_dynamic_capacity(const char *path, CxlEventLog log,
      * Host-local sanity check has passed;
      * try to reserve those regions in the MHD
      */
-    if (type == DC_EVENT_ADD_CAPACITY) {
-        // if (mhsld->add_capacity)
-        //      mhsld->add_capacity(...)
-        //      ... must facilitate a list's worth of extents ...
-        rc = true;
-        for (list = records; list; list = list->next) {
-            offset = list->value->offset;
-            len = list->value->len;
-            dpa = offset + region->base;
-
-            rc = cxl_mhd_set_state(dcd,
-                                region,
-                                (dpa - region->base) / region->block_size,
-                                len / region->block_size); 
-
-            if (!rc) {
-                rollback = records;
-                break;
-            }
-        }
-
-        /* Setting the mhd state failed. Roll back the extents that were added */
-        for (; rollback; rollback = rollback->next) {
-            offset = rollback->value->offset;
-            len = rollback->value->len;
-            dpa = offset + region->base;
-
-            cxl_mhd_clear_state(dcd,
-                                region,
-                                (dpa - region->base) / region->block_size,
-                                len / region->block_size);
-
-            if (rollback == list)
-                return;
-        }
+    if (type == DC_EVENT_ADD_CAPACITY &&
+        cvc->mhd_reserve_extents_in_region &&
+       !cvc->mhd_reserve_extents_in_region(&dcd->parent_obj, records, region)) {
+        error_setg(errp, "mhsld is enabled and extent reservation failed");
+        return;
     }
 
     blk_bitmap = bitmap_new(dcd->dc.regions[rid].len / block_size);
@@ -2325,8 +2182,8 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->set_cacheline = set_cacheline;
     cvc->mhd_get_info = NULL;
     cvc->mhd_access_valid = NULL;
-    cvc->mhdcd_allocate_extents = NULL;
-    /* cvc->mhdcd_deallocate_extents = NULL; */
+    cvc->mhd_reserve_extents_in_region = NULL;
+    cvc->mhd_release_extents_in_region = NULL;
 }
 
 static const TypeInfo ct3d_info = {

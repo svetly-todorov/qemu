@@ -540,8 +540,10 @@ struct CXLType3Class {
                                size_t *len_out,
                                CXLCCI *cci);
     bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
-    bool (*mhdcd_allocate_extents)(CXLType3Dev *dcd, CXLDCEventType type,
-		    CXLDCExtentRecordList *records, uint8_t rid, Error **errp);
+    bool (*mhd_reserve_extents_in_region)(PCIDevice *pci_dev,
+        CXLDCExtentRecordList *records, CXLDCRegion *region);
+    bool (*mhd_release_extents_in_region)(PCIDevice *pci_dev,
+        CXLDCExtentRecordList *records, CXLDCRegion *region);
     /*
     void (*mhdcd_deallocate_extents)(...);
     */
