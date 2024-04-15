@@ -461,7 +461,7 @@ typedef struct CXLDCRegion {
     uint32_t dsmadhandle;
     uint8_t flags;
     unsigned long *blk_bitmap;
-    uint32_t *blk_hostmap;
+    uint8_t *blk_hostmap;
 } CXLDCRegion;
 
 struct CXLType3Dev {

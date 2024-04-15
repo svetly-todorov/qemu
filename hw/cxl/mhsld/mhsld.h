@@ -14,6 +14,7 @@
 #include "qemu/units.h"
 
 #define MHSLD_BLOCK_SZ (2 * MiB)
+#define MHSLD_HEADER_SZ (4096)
 
 /*
  * We limit the number of heads to prevent the shared state
