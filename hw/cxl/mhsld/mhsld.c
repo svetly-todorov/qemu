@@ -191,23 +191,23 @@ static bool cxl_mhsld_access_valid(PCIDevice *d, uint64_t addr, unsigned int siz
 static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
                                                 CXLDCExtentRecordList *records,
                                                 CXLDCRegion *region) {
-    uint64_t offset, len, dpa;
+    uint64_t len, dpa;
     bool rc;
 
     CXLMHSLDState *s = CXL_MHSLD(pci_dev);
     CXLDCExtentRecordList *list = records, *rollback = NULL;
 
     for (; list; list = list->next) {
-        offset = list->value->offset;
         len = list->value->len;
-        dpa = offset + region->base;
+        dpa = list->value->offset + region->base;
 
         /*
+         * TODO:
          * The start-block calculation fails if regions have variable
          * block sizes -- we'd need to track region->start_block_idx
          * explicitly, and calculate offset/len relative to that.
          */
-        rc = cxl_mhsld_state_set(s, (dpa - region->base) / region->block_size,
+        rc = cxl_mhsld_state_set(s, dpa / region->block_size,
                                  len / region->block_size);
 
         if (!rc) {
@@ -218,11 +218,10 @@ static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
 
     /* Setting the mhd state failed. Roll back the extents that were added */
     for (; rollback; rollback = rollback->next) {
-        offset = rollback->value->offset;
         len = rollback->value->len;
-        dpa = offset + region->base;
+        dpa = list->value->offset + region->base;
 
-        cxl_mhsld_state_clear(s, (dpa - region->base) / region->block_size,
+        cxl_mhsld_state_clear(s, dpa / region->block_size,
                               len / region->block_size);
 
         if (rollback == list)
@@ -232,10 +231,28 @@ static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
     return true;
 }
 
-static bool cxl_mhsld_release_extents_in_region(PCIDevice *pci_dev,
-                                                CXLDCExtentRecordList *list,
-                                                CXLDCRegion *region) {
-    return false;
+static bool cxl_mhsld_release_extent_in_region(PCIDevice *pci_dev,
+                                               CXLDCRegion *region,
+                                               uint64_t dpa,
+                                               uint64_t len) {
+    cxl_mhsld_state_clear(dpa / region->block_size, len / region->block_size);
+    return true;
+}
+
+static bool cxl_mhsld_test_extent_block_backed(PCIDevice *pci_dev,
+                                               CXLDCRegion *region,
+                                               uint64_t dpa,
+                                               uint64_t len) {
+    size_t i;
+
+    dpa = dpa / region->block_size;
+    len = len / region->block_size;
+
+    for (i = 0; i < len; ++i)
+        if (s->mhd_state->blocks[dpa + i] != (1 << s->mhd_head))
+            return false;
+
+    return true;
 }
 
 static void cxl_mhsld_realize(PCIDevice *pci_dev, Error **errp)
@@ -354,7 +371,8 @@ static void cxl_mhsld_class_init(ObjectClass *klass, void *data)
     cvc->mhd_get_info = cmd_mhd_get_info;
     cvc->mhd_access_valid = cxl_mhsld_access_valid;
     cvc->mhd_reserve_extents_in_region = cxl_mhsld_reserve_extents_in_region;
-    cvc->mhd_release_extents_in_region = cxl_mhsld_release_extents_in_region;
+    cvc->mhd_release_extent_in_region = cxl_mhsld_release_extent_in_region;
+    cvc->mhd_test_extent_block_backed = cxl_mhsld_test_extent_block_backed;
 }
 
 static const TypeInfo cxl_mhsld_info = {

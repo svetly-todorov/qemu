@@ -1663,11 +1663,14 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
         const CXLUpdateDCExtentListInPl *in)
 {
     CXLDCExtent *ent, *ent_next;
+    CXLDCRegion *region;
     uint64_t dpa, len;
     uint32_t i;
     int cnt_delta = 0;
     CXLDCExtentList tmp_list;
     CXLRetCode ret = CXL_MBOX_SUCCESS;
+
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
 
     if (in->num_entries_updated == 0) {
         return CXL_MBOX_INVALID_INPUT;
@@ -1687,7 +1690,27 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
             ret = CXL_MBOX_INVALID_PA;
             goto free_and_exit;
         }
-        /* After this point, extent overflow is the only error can happen */
+
+        /*
+         * Get the DCD region. Needed for the mhd_block_backed test.
+         * This is not necessary if all regions have the same blocksize.
+         * TODO: discern if all regions will always have the same blocksize
+         */
+        region = cxl_find_dc_region(ct3d, dpa, len);
+
+        /* In an MHD, check that this DPA range belongs to this host */
+        if (cvc->mhd_test_extent_block_backed &&
+            !cvc->mhd_test_extent_block_backed(ct3d, region, dpa, len)) {
+            /* TODO: error code for when host does not own the req'd extent */
+            ret = CXL_MBOX_INVALID_PA;
+            goto free_and_exit;
+        }
+
+        /*
+         * After this point, extent overflow is the only error can happen
+         * Q: Why do we check for extent overflow here?
+         *    Shouldn't they already be valid by now?
+         */
         while (len > 0) {
             QTAILQ_FOREACH(ent, &tmp_list, node) {
                 range_init_nofail(&range, ent->start_dpa, ent->len);
@@ -1770,7 +1793,9 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
 {
     CXLUpdateDCExtentListInPl *in = (void *)payload_in;
     CXLType3Dev *ct3d = CXL_TYPE3(cci->d);
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     CXLDCExtentList *extent_list = &ct3d->dc.extents;
+    CXLDCRegion *region;
     CXLDCExtent *ent;
     uint32_t i;
     uint64_t dpa, len;
@@ -1799,27 +1824,52 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
         dpa = in->updated_entries[i].start_dpa;
         len = in->updated_entries[i].len;
 
+        if (cvc->cxl_mhd_release_extent_in_region) {
+            region = cxl_find_dc_region(ct3d, dpa, len);
+            cvc->cxl_mhd_release_extent_in_region(ct3d, region, dpa, len);
+        }
+
         while (len > 0) {
+            /* Loop over all extents */
             QTAILQ_FOREACH(ent, extent_list, node) {
                 range_init_nofail(&range, ent->start_dpa, ent->len);
 
-                /* Found the extent overlapping with */
+                /*
+                 * If this extent contains the base address
+                 * of the release request, operate on it.
+                 */
                 if (range_contains(&range, dpa)) {
                     uint64_t len1, len2 = 0, len_done = 0;
                     uint64_t ent_start_dpa = ent->start_dpa;
                     uint64_t ent_len = ent->len;
 
+                    /**
+                     *      len1            len            len2
+                     * |--------------|--------------|--------------|
+                     * ^              ^              ^
+                     * |              |              |
+                     * ent_start_dpa  dpa            end of request
+                     * 
+                     * If len stretches farther than the end of the extent
+                     * (i.e. ent->start_dpa + ent->len) then len2 is zero.
+                     */
                     len1 = dpa - ent_start_dpa;
                     if (range_contains(&range, dpa + len - 1)) {
                         len2 = ent_start_dpa + ent_len - dpa - len;
                     }
                     len_done = ent_len - len1 - len2;
 
+                    /* Reset the backing state of this extent, wholesale */
                     cxl_remove_extent_from_extent_list(extent_list, ent);
                     ct3d->dc.total_extent_count -= 1;
                     ct3_clear_region_block_backed(ct3d, ent_start_dpa,
                                                   ent_len);
 
+                    /*
+                     * If len1 is nonzero, then there are len1 blocks
+                     * that are still assigned to the host before
+                     * start_dpa. Reset their state.
+                     */
                     if (len1) {
                         cxl_insert_extent_to_extent_list(extent_list,
                                                          ent_start_dpa,
@@ -1828,6 +1878,11 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
                         ct3_set_region_block_backed(ct3d, ent_start_dpa,
                                                     len1);
                     }
+                    /*
+                     * If len2 is nonzero, then there are len2 blocks
+                     * that are still assigned to the host after
+                     * start_dpa + len. Reset their state.
+                     */
                     if (len2) {
                         cxl_insert_extent_to_extent_list(extent_list,
                                                          dpa + len,

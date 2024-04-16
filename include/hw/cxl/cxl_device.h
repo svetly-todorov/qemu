@@ -542,11 +542,10 @@ struct CXLType3Class {
     bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
     bool (*mhd_reserve_extents_in_region)(PCIDevice *pci_dev,
         CXLDCExtentRecordList *records, CXLDCRegion *region);
-    bool (*mhd_release_extents_in_region)(PCIDevice *pci_dev,
-        CXLDCExtentRecordList *records, CXLDCRegion *region);
-    /*
-    void (*mhdcd_deallocate_extents)(...);
-    */
+    bool (*mhd_release_extent_in_region)(PCIDevice *pci_dev,
+        CXLDCRegion *region, uint64_t dpa, uint64_t len);
+    bool (*mhd_test_extent_block_backed)(PCIDevice *pci_dev,
+        CXLDCRegion *region, uint64_t dpa, uint64_t len);
 };
 
 struct CSWMBCCIDev {

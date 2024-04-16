@@ -620,12 +620,6 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     }
 }
 
-static int cxl_mhd_unlink_state(uint64_t sn) {
-    char name[128];
-    snprintf(name, sizeof(name), "/dcd_%lu", sn);
-    return shm_unlink(name);
-}
-
 static void cxl_mhd_clear_state(CXLType3Dev *ct3d,
                                CXLDCRegion *region,
                                size_t start_block,
@@ -707,6 +701,8 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     int i;
     CXLDCRegion *region;
 
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
+
     QTAILQ_FOREACH_SAFE(ent, &ct3d->dc.extents, node, ent_next) {
         cxl_remove_extent_from_extent_list(&ct3d->dc.extents, ent);
     }
@@ -718,6 +714,8 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     for (i = 0; i < ct3d->dc.num_regions; i++) {
         region = &ct3d->dc.regions[i];
         g_free(region->blk_bitmap);
+        if (cvc->mhd_release_extents_in_region)
+           cvc->mhd_release_extents_in_region(ct3d, region, 0, region->len);
         cxl_mhd_clear_state(ct3d, region, 0, region->len / region->block_size);
     }
 }
@@ -946,7 +944,6 @@ void ct3_exit(PCIDevice *pci_dev)
     g_free(regs->special_ops);
     if (ct3d->dc.host_dc) {
         cxl_destroy_dc_regions(ct3d);
-        cxl_mhd_unlink_state(ct3d->sn);
         address_space_destroy(&ct3d->dc.host_dc_as);
     }
     if (ct3d->hostpmem) {
@@ -2183,7 +2180,8 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->mhd_get_info = NULL;
     cvc->mhd_access_valid = NULL;
     cvc->mhd_reserve_extents_in_region = NULL;
-    cvc->mhd_release_extents_in_region = NULL;
+    cvc->mhd_release_extent_in_region = NULL;
+    cvc->mhd_test_extent_block_backed = NULL;
 }
 
 static const TypeInfo ct3d_info = {
