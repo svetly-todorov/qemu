@@ -768,7 +768,8 @@ static void virtio_blk_handle_zone_report(VirtIOBlockReq *req,
             sizeof(struct virtio_blk_zone_report) +
             sizeof(struct virtio_blk_zone_descriptor)) {
         virtio_error(vdev, "in buffer too small for zone report");
-        return;
+        err_status = VIRTIO_BLK_S_ZONE_INVALID_CMD;
+        goto out;
     }
 
     /* start byte offset of the zone report */
@@ -1682,6 +1683,7 @@ static bool apply_iothread_vq_mapping(
 /* Context: BQL held */
 static bool virtio_blk_vq_aio_context_init(VirtIOBlock *s, Error **errp)
 {
+    ERRP_GUARD();
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
     VirtIOBlkConf *conf = &s->conf;
     BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
