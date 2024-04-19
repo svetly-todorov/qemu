@@ -336,6 +336,10 @@ static void build_dvsecs(CXLType3Dev *ct3d)
             range2_size_hi = ct3d->hostpmem->size >> 32;
             range2_size_lo = (2 << 5) | (2 << 2) | 0x3 |
                              (ct3d->hostpmem->size & 0xF0000000);
+        } else if (ct3d->dc.host_dc) {
+            range2_size_hi = ct3d->dc.host_dc->size >> 32;
+            range2_size_lo = (2 << 5) | (2 << 2) | 0x3 |
+                             (ct3d->dc.host_dc->size & 0xF0000000);
         }
     } else if (ct3d->hostpmem) {
         range1_size_hi = ct3d->hostpmem->size >> 32;
@@ -695,6 +699,8 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     for (i = 0; i < ct3d->dc.num_regions; i++) {
         region = &ct3d->dc.regions[i];
         g_free(region->blk_bitmap);
+        if (cvc->mhd_release_extent_in_region)
+           cvc->mhd_release_extent_in_region(d, region, 0, region->len);
     }
 }
 
@@ -799,7 +805,11 @@ static bool cxl_setup_memory(CXLType3Dev *ct3d, Error **errp)
         g_free(dc_name);
 
         if (!cxl_create_dc_regions(ct3d, errp)) {
-            error_setg(errp, "setup DC regions failed");
+            /*
+             * CANNOT set errp here because all the failure states of
+             * cxl_create_dc_regions already fill it out with an error message.
+             */
+            // error_setg(errp, "setup DC regions failed");
             return false;
         }
     }
@@ -812,7 +822,7 @@ static DOEProtocol doe_cdat_prot[] = {
     { }
 };
 
-static void ct3_realize(PCIDevice *pci_dev, Error **errp)
+void ct3_realize(PCIDevice *pci_dev, Error **errp)
 {
     ERRP_GUARD();
     CXLType3Dev *ct3d = CXL_TYPE3(pci_dev);
@@ -907,7 +917,7 @@ err_address_space_free:
     return;
 }
 
-static void ct3_exit(PCIDevice *pci_dev)
+void ct3_exit(PCIDevice *pci_dev)
 {
     CXLType3Dev *ct3d = CXL_TYPE3(pci_dev);
     CXLComponentState *cxl_cstate = &ct3d->cxl_cstate;
@@ -1111,6 +1121,7 @@ MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
                            unsigned size, MemTxAttrs attrs)
 {
     CXLType3Dev *ct3d = CXL_TYPE3(d);
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     uint64_t dpa_offset = 0;
     AddressSpace *as = NULL;
     int res;
@@ -1118,6 +1129,11 @@ MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
     res = cxl_type3_hpa_to_as_and_dpa(ct3d, host_addr, size,
                                       &as, &dpa_offset);
     if (res) {
+        return MEMTX_ERROR;
+    }
+
+    if (cvc->mhd_access_valid &&
+        !cvc->mhd_access_valid(d, dpa_offset, size)) {
         return MEMTX_ERROR;
     }
 
@@ -1133,6 +1149,7 @@ MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
                             unsigned size, MemTxAttrs attrs)
 {
     CXLType3Dev *ct3d = CXL_TYPE3(d);
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     uint64_t dpa_offset = 0;
     AddressSpace *as = NULL;
     int res;
@@ -1143,6 +1160,11 @@ MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
         return MEMTX_ERROR;
     }
 
+    if (cvc->mhd_access_valid &&
+        !cvc->mhd_access_valid(d, dpa_offset, size)) {
+        return MEMTX_ERROR;
+    }
+
     if (sanitize_running(&ct3d->cci)) {
         return MEMTX_OK;
     }
@@ -1150,7 +1172,7 @@ MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
     return address_space_write(as, dpa_offset, attrs, &data, size);
 }
 
-static void ct3d_reset(DeviceState *dev)
+void ct3d_reset(DeviceState *dev)
 {
     CXLType3Dev *ct3d = CXL_TYPE3(dev);
     uint32_t *reg_state = ct3d->cxl_cstate.crb.cache_mem_registers;
@@ -1874,6 +1896,7 @@ static void qmp_cxl_process_dynamic_capacity_prescriptive(const char *path,
     CXLEventDynamicCapacity dCap = {};
     CXLEventRecordHdr *hdr = &dCap.hdr;
     CXLType3Dev *dcd;
+    CXLType3Class *cvc;
     uint8_t flags = 1 << CXL_EVENT_TYPE_INFO;
     uint32_t num_extents = 0;
     CXLDCExtentRecordList *list;
@@ -1891,6 +1914,7 @@ static void qmp_cxl_process_dynamic_capacity_prescriptive(const char *path,
     }
 
     dcd = CXL_TYPE3(obj);
+    cvc = CXL_TYPE3_GET_CLASS(dcd);
     if (!dcd->dc.num_regions) {
         error_setg(errp, "No dynamic capacity support from the device");
         return;
@@ -1901,6 +1925,7 @@ static void qmp_cxl_process_dynamic_capacity_prescriptive(const char *path,
         error_setg(errp, "region id is too large");
         return;
     }
+    region = &dcd->dc.regions[rid];
     block_size = dcd->dc.regions[rid].block_size;
     blk_bitmap = bitmap_new(dcd->dc.regions[rid].len / block_size);
 
@@ -1961,6 +1986,17 @@ static void qmp_cxl_process_dynamic_capacity_prescriptive(const char *path,
         }
         list = list->next;
         num_extents++;
+    }
+
+    /*
+     * Host-local sanity check has passed;
+     * try to reserve those regions in the MHD
+     */
+    if (type == DC_EVENT_ADD_CAPACITY &&
+        cvc->mhd_reserve_extents_in_region &&
+       !cvc->mhd_reserve_extents_in_region(&dcd->parent_obj, records, region)) {
+        error_setg(errp, "mhsld is enabled and extent reservation failed");
+        return;
     }
 
     /* Create extent list for event being passed to host */
@@ -2195,6 +2231,10 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->get_lsa = get_lsa;
     cvc->set_lsa = set_lsa;
     cvc->set_cacheline = set_cacheline;
+    cvc->mhd_get_info = NULL;
+    cvc->mhd_access_valid = NULL;
+    cvc->mhd_reserve_extents_in_region = NULL;
+    cvc->mhd_release_extent_in_region = NULL;
 }
 
 static const TypeInfo ct3d_info = {

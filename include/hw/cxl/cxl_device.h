@@ -14,6 +14,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/register.h"
 #include "hw/cxl/cxl_events.h"
+#include "qapi/qapi-commands-cxl.h"
 
 /*
  * The following is how a CXL device's Memory Device registers are laid out.
@@ -526,6 +527,18 @@ struct CXLType3Class {
                     uint64_t offset);
     bool (*set_cacheline)(CXLType3Dev *ct3d, uint64_t dpa_offset,
                           uint8_t *data);
+    /* Multi-headed Device */
+    CXLRetCode (*mhd_get_info)(const struct cxl_cmd *cmd,
+                               uint8_t *payload_in,
+                               size_t len_in,
+                               uint8_t *payload_out,
+                               size_t *len_out,
+                               CXLCCI *cci);
+    bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
+    bool (*mhd_reserve_extents_in_region)(PCIDevice *d,
+        CXLDCExtentRecordList *records, CXLDCRegion *region);
+    bool (*mhd_release_extent_in_region)(PCIDevice *d,
+        CXLDCRegion *region, uint64_t dpa, uint64_t len);
 };
 
 struct CSWMBCCIDev {
@@ -543,6 +556,10 @@ MemTxResult cxl_type3_read(PCIDevice *d, hwaddr host_addr, uint64_t *data,
                            unsigned size, MemTxAttrs attrs);
 MemTxResult cxl_type3_write(PCIDevice *d, hwaddr host_addr, uint64_t data,
                             unsigned size, MemTxAttrs attrs);
+
+void ct3_realize(PCIDevice *pci_dev, Error **errp);
+void ct3_exit(PCIDevice *pci_dev);
+void ct3d_reset(DeviceState *d);
 
 uint64_t cxl_device_get_timestamp(CXLDeviceState *cxlds);
 
