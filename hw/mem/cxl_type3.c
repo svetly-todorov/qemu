@@ -620,18 +620,6 @@ static void ct3d_reg_write(void *opaque, hwaddr offset, uint64_t value,
     }
 }
 
-static void cxl_mhd_clear_state(CXLType3Dev *ct3d,
-                               CXLDCRegion *region,
-                               size_t start_block,
-                               size_t nblocks)
-{
-    if (!region->blk_hostmap)
-        return;
-
-    for (size_t i = 0; i < nblocks; ++i)
-        region->blk_hostmap[start_block + i] &= ~(1u << ct3d->dc.head);
-}
-
 /*
  * TODO: dc region configuration will be updated once host backend and address
  * space support is added for DCD.
@@ -702,6 +690,7 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     CXLDCRegion *region;
 
     CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
+    PCIDevice *d = &ct3d->parent_obj;
 
     QTAILQ_FOREACH_SAFE(ent, &ct3d->dc.extents, node, ent_next) {
         cxl_remove_extent_from_extent_list(&ct3d->dc.extents, ent);
@@ -714,9 +703,8 @@ static void cxl_destroy_dc_regions(CXLType3Dev *ct3d)
     for (i = 0; i < ct3d->dc.num_regions; i++) {
         region = &ct3d->dc.regions[i];
         g_free(region->blk_bitmap);
-        if (cvc->mhd_release_extents_in_region)
-           cvc->mhd_release_extents_in_region(ct3d, region, 0, region->len);
-        cxl_mhd_clear_state(ct3d, region, 0, region->len / region->block_size);
+        if (cvc->mhd_release_extent_in_region)
+           cvc->mhd_release_extent_in_region(d, region, 0, region->len);
     }
 }
 
@@ -1016,8 +1004,6 @@ void ct3_clear_region_block_backed(CXLType3Dev *ct3d, uint64_t dpa,
     nr = (dpa - region->base) / region->block_size;
     nbits = len / region->block_size;
     bitmap_clear(region->blk_bitmap, nr, nbits);
-
-    cxl_mhd_clear_state(ct3d, region, nr, nbits);
 }
 
 static bool cxl_type3_dpa(CXLType3Dev *ct3d, hwaddr host_addr, uint64_t *dpa)
@@ -2181,7 +2167,6 @@ static void ct3_class_init(ObjectClass *oc, void *data)
     cvc->mhd_access_valid = NULL;
     cvc->mhd_reserve_extents_in_region = NULL;
     cvc->mhd_release_extent_in_region = NULL;
-    cvc->mhd_test_extent_block_backed = NULL;
 }
 
 static const TypeInfo ct3d_info = {

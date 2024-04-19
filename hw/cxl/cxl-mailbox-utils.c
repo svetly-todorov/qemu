@@ -1663,7 +1663,6 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
         const CXLUpdateDCExtentListInPl *in)
 {
     CXLDCExtent *ent, *ent_next;
-    CXLDCRegion *region;
     uint64_t dpa, len;
     uint32_t i;
     int cnt_delta = 0;
@@ -1671,6 +1670,7 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
     CXLRetCode ret = CXL_MBOX_SUCCESS;
 
     CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
+    PCIDevice *d = &ct3d->parent_obj;
 
     if (in->num_entries_updated == 0) {
         return CXL_MBOX_INVALID_INPUT;
@@ -1691,26 +1691,15 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
             goto free_and_exit;
         }
 
-        /*
-         * Get the DCD region. Needed for the mhd_block_backed test.
-         * This is not necessary if all regions have the same blocksize.
-         * TODO: discern if all regions will always have the same blocksize
-         */
-        region = cxl_find_dc_region(ct3d, dpa, len);
-
         /* In an MHD, check that this DPA range belongs to this host */
-        if (cvc->mhd_test_extent_block_backed &&
-            !cvc->mhd_test_extent_block_backed(ct3d, region, dpa, len)) {
+        if (cvc->mhd_access_valid &&
+            !cvc->mhd_access_valid(d, dpa, len)) {
             /* TODO: error code for when host does not own the req'd extent */
             ret = CXL_MBOX_INVALID_PA;
             goto free_and_exit;
         }
 
-        /*
-         * After this point, extent overflow is the only error can happen
-         * Q: Why do we check for extent overflow here?
-         *    Shouldn't they already be valid by now?
-         */
+        /* After this point, extent overflow is the only error can happen */
         while (len > 0) {
             QTAILQ_FOREACH(ent, &tmp_list, node) {
                 range_init_nofail(&range, ent->start_dpa, ent->len);
@@ -1815,8 +1804,6 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
         return ret;
     }
 
-    /********** MHSLD TODO: HOOK FOR BIT ACCOUNTING SOMEWHERE IN THIS FUNCTION ********/
-
     /* From this point, all the extents to release are valid */
     for (i = 0; i < in->num_entries_updated; i++) {
         Range range;
@@ -1824,9 +1811,10 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
         dpa = in->updated_entries[i].start_dpa;
         len = in->updated_entries[i].len;
 
-        if (cvc->cxl_mhd_release_extent_in_region) {
+        /* MHD hook */
+        if (cvc->mhd_release_extent_in_region) {
             region = cxl_find_dc_region(ct3d, dpa, len);
-            cvc->cxl_mhd_release_extent_in_region(ct3d, region, dpa, len);
+            cvc->mhd_release_extent_in_region(&ct3d->parent_obj, region, dpa, len);
         }
 
         while (len > 0) {

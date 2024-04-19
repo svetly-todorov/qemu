@@ -113,6 +113,22 @@ static void cxl_mhsld_state_initialize(CXLMHSLDState *s, size_t dc_size) {
     s->mhd_state->nr_blocks = dc_size / MHSLD_BLOCK_SZ;
 }
 
+/* Returns starting index of region in MHD map. */
+static inline size_t cxl_mhsld_find_dc_region_start(PCIDevice *d,
+                                                    CXLDCRegion *r) {
+    CXLType3Dev *dcd = CXL_TYPE3(d);
+    size_t start = 0;
+    uint8_t rid;
+
+    for (rid = 0; rid < dcd->dc.num_regions; ++rid) {
+        if (&dcd->dc.regions[rid] == r)
+            break;
+        start += dcd->dc.regions[rid].len / dcd->dc.regions[rid].block_size;
+    }
+
+    return start;
+}
+
 static MHSLDSharedState *cxl_mhsld_state_map(CXLMHSLDState *s) {
     void *map;
     size_t size = s->mhd_state_size;
@@ -176,10 +192,6 @@ static void cxl_mhsld_state_clear(CXLMHSLDState *s,
     }
 }
 
-static bool cxl_mhsld_access_valid(PCIDevice *d, uint64_t addr, unsigned int size) {
-    return true;
-}
-
 /*
  * Triggered during an add_capacity command to a CXL device:
  * takes a list of extent records and preallocates them,
@@ -188,13 +200,13 @@ static bool cxl_mhsld_access_valid(PCIDevice *d, uint64_t addr, unsigned int siz
  * Extents that are not accepted by the host will be rolled
  * back later.
  */
-static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
+static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *d,
                                                 CXLDCExtentRecordList *records,
                                                 CXLDCRegion *region) {
     uint64_t len, dpa;
     bool rc;
 
-    CXLMHSLDState *s = CXL_MHSLD(pci_dev);
+    CXLMHSLDState *s = CXL_MHSLD(d);
     CXLDCExtentRecordList *list = records, *rollback = NULL;
 
     for (; list; list = list->next) {
@@ -203,11 +215,10 @@ static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
 
         /*
          * TODO:
-         * The start-block calculation fails if regions have variable
-         * block sizes -- we'd need to track region->start_block_idx
-         * explicitly, and calculate offset/len relative to that.
+         * Replace dpa division with cxl_mhsld_find_dc_region_start().
          */
-        rc = cxl_mhsld_state_set(s, dpa / region->block_size,
+        rc = cxl_mhsld_state_set(s,
+                                 dpa / region->block_size,
                                  len / region->block_size);
 
         if (!rc) {
@@ -221,7 +232,8 @@ static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
         len = rollback->value->len;
         dpa = list->value->offset + region->base;
 
-        cxl_mhsld_state_clear(s, dpa / region->block_size,
+        cxl_mhsld_state_clear(s,
+                              dpa / region->block_size,
                               len / region->block_size);
 
         if (rollback == list)
@@ -231,26 +243,37 @@ static bool cxl_mhsld_reserve_extents_in_region(PCIDevice *pci_dev,
     return true;
 }
 
-static bool cxl_mhsld_release_extent_in_region(PCIDevice *pci_dev,
+static bool cxl_mhsld_release_extent_in_region(PCIDevice *d,
                                                CXLDCRegion *region,
                                                uint64_t dpa,
                                                uint64_t len) {
-    cxl_mhsld_state_clear(dpa / region->block_size, len / region->block_size);
+    /*
+     * TODO:
+     * Replace dpa division with cxl_mhsld_find_dc_region_start().
+     */
+    cxl_mhsld_state_clear(CXL_MHSLD(d),
+                          dpa / region->block_size,
+                          len / region->block_size);
     return true;
 }
 
-static bool cxl_mhsld_test_extent_block_backed(PCIDevice *pci_dev,
-                                               CXLDCRegion *region,
-                                               uint64_t dpa,
-                                               uint64_t len) {
+static bool cxl_mhsld_access_valid(PCIDevice *d, uint64_t addr, unsigned int size) {
+    CXLType3Dev *ct3d = CXL_TYPE3(d);
+    CXLMHSLDState *s = CXL_MHSLD(d);
+    CXLDCRegion *r = cxl_find_dc_region(ct3d, addr, size);
     size_t i;
 
-    dpa = dpa / region->block_size;
-    len = len / region->block_size;
+    /*
+     * TODO:
+     * Replace addr division with cxl_mhsld_find_dc_region_start().
+     */
+    addr = addr / r->block_size;
+    size = size / r->block_size;
 
-    for (i = 0; i < len; ++i)
-        if (s->mhd_state->blocks[dpa + i] != (1 << s->mhd_head))
+    for (i = 0; i < size; ++i) {
+        if (s->mhd_state->blocks[addr + i] != (1 << s->mhd_head))
             return false;
+    }
 
     return true;
 }
@@ -372,7 +395,6 @@ static void cxl_mhsld_class_init(ObjectClass *klass, void *data)
     cvc->mhd_access_valid = cxl_mhsld_access_valid;
     cvc->mhd_reserve_extents_in_region = cxl_mhsld_reserve_extents_in_region;
     cvc->mhd_release_extent_in_region = cxl_mhsld_release_extent_in_region;
-    cvc->mhd_test_extent_block_backed = cxl_mhsld_test_extent_block_backed;
 }
 
 static const TypeInfo cxl_mhsld_info = {
