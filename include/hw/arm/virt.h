@@ -154,6 +154,7 @@ struct VirtMachineState {
     bool tcg_its;
     bool virt;
     bool ras;
+    bool fw_first_ras;
     bool mte;
     bool dtb_randomness;
     OnOffAuto acpi;
