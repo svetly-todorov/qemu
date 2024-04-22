@@ -361,3 +361,72 @@
 ##
 {'command': 'cxl-inject-correctable-error',
  'data': {'path': 'str', 'type': 'CxlCorErrorType'}}
+
+##
+# @CXLDCExtentRecord:
+#
+# Record of a single extent to add/release
+#
+# @offset: offset to the start of the region where the extent to be operated
+# @len: length of the extent
+#
+# Since: 9.1
+##
+{ 'struct': 'CXLDCExtentRecord',
+  'data': {
+      'offset':'uint64',
+      'len': 'uint64'
+  }
+}
+
+##
+# @cxl-add-dynamic-capacity:
+#
+# Command to start add dynamic capacity extents flow. The device will
+# have to acknowledged the acceptance of the extents before they are usable.
+#
+# @path: CXL DCD canonical QOM path
+# @hid: host id
+# @selection-policy: policy to use for selecting extents for adding capacity
+# @region-id: id of the region where the extent to add
+# @tag: Context field
+# @extents: Extents to add
+#
+# Since : 9.1
+##
+{ 'command': 'cxl-add-dynamic-capacity',
+  'data': { 'path': 'str',
+            'hid': 'uint16',
+            'selection-policy': 'uint8',
+            'region-id': 'uint8',
+            'tag': 'str',
+            'extents': [ 'CXLDCExtentRecord' ]
+           }
+}
+
+##
+# @cxl-release-dynamic-capacity:
+#
+# Command to start release dynamic capacity extents flow. The host will
+# need to respond to indicate that it has released the capacity before it
+# is made unavailable for read and write and can be re-added.
+#
+# @path: CXL DCD canonical QOM path
+# @hid: host id
+# @flags: bit[3:0] for removal policy, bit[4] for forced removal, bit[5] for
+#     sanitize on release, bit[7:6] reserved
+# @region-id: id of the region where the extent to release
+# @tag: Context field
+# @extents: Extents to release
+#
+# Since : 9.1
+##
+{ 'command': 'cxl-release-dynamic-capacity',
+  'data': { 'path': 'str',
+            'hid': 'uint16',
+            'flags': 'uint8',
+            'region-id': 'uint8',
+            'tag': 'str',
+            'extents': [ 'CXLDCExtentRecord' ]
+           }
+}
