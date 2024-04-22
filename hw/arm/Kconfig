@@ -33,6 +33,7 @@ config ARM_VIRT
     select VIRTIO_MEM_SUPPORTED
     select ACPI_CXL
     select ACPI_HMAT
+    select ACPI_RASF
     select I2C_MCTP
     select I2C_MCTP_CXL
 

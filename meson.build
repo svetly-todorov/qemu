@@ -2833,6 +2833,10 @@ config_host_data.set('CONFIG_ARM_AES_BUILTIN', cc.compiles('''
     void foo(uint8x16_t *p) { *p = vaesmcq_u8(*p); }
   '''))
 
+# Enable CONFIG_ACPI_RAS2_FT for RAS2 feature table support for the patrol scrubber.
+# Disable CONFIG_ACPI_RAS2_FT for RASF support for the patrol scrubber.
+config_host_data.set('CONFIG_ACPI_RAS2_FT', 1)
+
 have_pvrdma = get_option('pvrdma') \
   .require(rdma.found(), error_message: 'PVRDMA requires OpenFabrics libraries') \
   .require(cc.compiles(gnu_source_prefix + '''

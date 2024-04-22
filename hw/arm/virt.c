@@ -83,6 +83,7 @@
 #include "hw/mem/pc-dimm.h"
 #include "hw/mem/nvdimm.h"
 #include "hw/acpi/generic_event_device.h"
+#include "hw/acpi/rasf.h"
 #include "hw/virtio/virtio-md-pci.h"
 #include "hw/virtio/virtio-iommu.h"
 #include "hw/char/pl011.h"
@@ -186,6 +187,7 @@ static const MemMapEntry base_memmap[] = {
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     [VIRT_I2C] =                { 0x0b000000, 0x00004000 },
     [VIRT_RESET_FAKE] =         { 0x0b004000, 0x00000010 },
+    [VIRT_PCC] =                { 0x0b005000, 0x00001000 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
     [VIRT_SECURE_MEM] =         { 0x0e000000, 0x01000000 },
@@ -229,6 +231,7 @@ static const int a15irqmap[] = {
     [VIRT_SECURE_UART] = 8,
     [VIRT_ACPI_GED] = 9,
     [VIRT_I2C] = 10,
+    [VIRT_PCC] = 11,
     [VIRT_MMIO] = 16, /* ...to 16 + NUM_VIRTIO_TRANSPORTS - 1 */
     [VIRT_GIC_V2M] = 48, /* ...to 48 + NUM_GICV2M_SPIS - 1 */
     [VIRT_SMMU] = 74,    /* ...to 74 + NUM_SMMU_IRQS - 1 */
@@ -717,6 +720,18 @@ static void create_its(VirtMachineState *vms)
 
     fdt_add_its_gic_node(vms);
     vms->msi_controller = VIRT_MSI_CTRL_ITS;
+}
+
+static void create_rasf(VirtMachineState *vms)
+{
+    DeviceState *dev;
+
+    dev = qdev_new("acpi-rasf");
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, vms->memmap[VIRT_PCC].base);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in(vms->gic, vms->irqmap[VIRT_PCC]));
 }
 
 static void create_v2m(VirtMachineState *vms)
@@ -2675,9 +2690,17 @@ static void machvirt_init(MachineState *machine)
 
     create_mctp(machine);
 
-     /* connect powerdown request */
-     vms->powerdown_notifier.notify = virt_powerdown_req;
-     qemu_register_powerdown_notifier(&vms->powerdown_notifier);
+    if (vms->rasf) {
+	create_rasf(vms);
+    }
+
+    if (vms->ras2_ft) {
+	create_rasf(vms);
+    }
+ 
+    /* connect powerdown request */
+    vms->powerdown_notifier.notify = virt_powerdown_req;
+    qemu_register_powerdown_notifier(&vms->powerdown_notifier);
 
     /* Create mmio transports, so the user can create virtio backends
      * (which will be automatically plugged in to the transports). If
@@ -2840,6 +2863,34 @@ static void virt_set_dtb_randomness(Object *obj, bool value, Error **errp)
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     vms->dtb_randomness = value;
+}
+
+static bool virt_get_rasf(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->rasf;
+}
+
+static void virt_set_rasf(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->rasf = value;
+}
+
+static bool virt_get_ras2_ft(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->ras2_ft;
+}
+
+static void virt_set_ras2_ft(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->ras2_ft = value;
 }
 
 static char *virt_get_oem_id(Object *obj, Error **errp)
@@ -3522,6 +3573,16 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
                                           "Override the default value of field OEM Table ID "
                                           "in ACPI table header."
                                           "The string may be up to 8 bytes in size");
+
+    object_class_property_add_bool(oc, "rasf",
+                                   virt_get_rasf, virt_set_rasf);
+    object_class_property_set_description(oc, "rasf",
+                                          "Enable RASF ras feature control via ACPI PCC");
+
+    object_class_property_add_bool(oc, "ras2-ft",
+                                   virt_get_ras2_ft, virt_set_ras2_ft);
+    object_class_property_set_description(oc, "ras2-ft",
+                                          "Enable RAS2 FT ras feature control via ACPI PCC");
 
 }
 

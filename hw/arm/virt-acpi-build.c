@@ -42,6 +42,7 @@
 #include "hw/acpi/cxl.h"
 #include "hw/acpi/memory_hotplug.h"
 #include "hw/acpi/generic_event_device.h"
+#include "hw/acpi/rasf.h"
 #include "hw/acpi/tpm.h"
 #include "hw/acpi/hmat.h"
 #include "hw/cxl/cxl.h"
@@ -563,6 +564,84 @@ spcr_setup(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
 }
 
 /*
+ * ACPI spec, Revision 6.5
+ * Section 5.2.20 ACPI RAS Feature Table
+ */
+static void
+build_rasf(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+{
+    AcpiTable table = { .sig = "RASF", .rev = 1, .oem_id = vms->oem_id,
+                        .oem_table_id = vms->oem_table_id };
+    acpi_table_begin(&table, table_data);
+    build_append_int_noprefix(table_data, 0, 12);
+    acpi_table_end(linker, &table);
+}
+
+/*
+ * ACPI spec, Revision 6.5
+ * Section 5.2.21 ACPI RAS2 Feature Table
+ */
+static void
+build_ras2_ft(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+{
+    AcpiTable table = { .sig = "RAS2", .rev = 1, .oem_id = vms->oem_id,
+                        .oem_table_id = vms->oem_table_id };
+    acpi_table_begin(&table, table_data);
+    build_append_int_noprefix(table_data, 0, 2); /* Reserved */
+    build_append_int_noprefix(table_data, 1, 2); /* Number of PCC descriptors */
+
+    /* RAS2 Platform Communication Channel (PCC) Descriptor List
+     * ACPI spec, Revision 6.5
+     * Table 5.80: RAS2 Platform Communication Channel Descriptor format
+     */
+    build_append_int_noprefix(table_data, 0, 1); /* PCC Identifier */
+    build_append_int_noprefix(table_data, 0, 2); /* Reserved */
+    build_append_int_noprefix(table_data, 0, 1); /* Feature Type */
+    build_append_int_noprefix(table_data, 1, 4); /* Instance */
+    acpi_table_end(linker, &table);
+}
+
+/*
+ * ACPI spec, Revision 6.5
+ * Section 14.1 Platform Communications Channel Table
+ */
+static void
+build_pcct(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
+{
+    AcpiTable table = { .sig = "PCCT", .rev = 2, .oem_id = vms->oem_id,
+                        .oem_table_id = vms->oem_table_id };
+    acpi_table_begin(&table, table_data);
+    /* Capable of generating an interrupt */
+    build_append_int_noprefix(table_data, 1, 4);
+    build_append_int_noprefix(table_data, 0, 8); /* Reserved */
+
+    /* Hardware reduced Communications Subspace Structure */
+    build_append_int_noprefix(table_data, 2, 1); /* Type 2 */
+    build_append_int_noprefix(table_data, 90, 1); /* Length as per spec */
+    build_append_int_noprefix(table_data,
+                              vms->irqmap[VIRT_PCC] + ARM_SPI_BASE, 4);
+    build_append_int_noprefix(table_data, (1 << 1), 1); /* Active high edge */
+    build_append_int_noprefix(table_data, 0, 1); /* reserved */
+    build_append_int_noprefix(table_data, vms->memmap[VIRT_PCC].base, 8);
+    /* Allow for space up to the doorbell */
+    build_append_int_noprefix(table_data, RASF_PCC_DOORBELL_OFFSET, 8);
+
+    build_append_gas(table_data, AML_AS_SYSTEM_MEMORY, 32, 0, 1,
+                     vms->memmap[VIRT_PCC].base + RASF_PCC_DOORBELL_OFFSET);
+    build_append_int_noprefix(table_data, 0, 8);
+    build_append_int_noprefix(table_data, 1, 8);
+    build_append_int_noprefix(table_data, 1000, 4); /* 1msec latency*/
+    build_append_int_noprefix(table_data, 0, 4);
+    build_append_int_noprefix(table_data, 0, 2);
+    build_append_gas(table_data, AML_AS_SYSTEM_MEMORY, 32, 0, 1,
+                     vms->memmap[VIRT_PCC].base + RASF_PCC_INT_ACK_OFFSET);
+    build_append_int_noprefix(table_data, 0, 8);
+    build_append_int_noprefix(table_data, 1, 8);
+
+    acpi_table_end(linker, &table);
+}
+
+/*
  * ACPI spec, Revision 5.1
  * 5.2.16 System Resource Affinity Table (SRAT)
  */
@@ -1067,6 +1146,20 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
         acpi_add_table(table_offsets, tables_blob);
         acpi_build_hest(tables_blob, tables->linker, vms->oem_id,
                         vms->oem_table_id);
+    }
+
+    if (vms->rasf) {
+        acpi_add_table(table_offsets, tables_blob);
+        build_pcct(tables_blob, tables->linker, vms);
+        acpi_add_table(table_offsets, tables_blob);
+        build_rasf(tables_blob, tables->linker, vms);
+    }
+
+    if (vms->ras2_ft) {
+        acpi_add_table(table_offsets, tables_blob);
+        build_pcct(tables_blob, tables->linker, vms);
+        acpi_add_table(table_offsets, tables_blob);
+        build_ras2_ft(tables_blob, tables->linker, vms);
     }
 
     if (ms->numa_state->num_nodes > 0) {

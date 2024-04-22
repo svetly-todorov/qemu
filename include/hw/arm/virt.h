@@ -62,6 +62,7 @@ enum {
     VIRT_SMMU,
     VIRT_UART,
     VIRT_MMIO,
+    VIRT_PCC,
     VIRT_I2C,
     VIRT_RESET_FAKE,
     VIRT_RTC,
@@ -157,6 +158,8 @@ struct VirtMachineState {
     bool fw_first_ras;
     bool mte;
     bool dtb_randomness;
+    bool rasf;
+    bool ras2_ft;
     OnOffAuto acpi;
     VirtGICType gic_version;
     VirtIOMMUType iommu;
@@ -182,6 +185,7 @@ struct VirtMachineState {
     char *oem_table_id;
     bool ns_el2_virt_timer_irq;
     CXLState cxl_devices_state;
+    MemoryRegion pcc_mr;
 };
 
 #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)

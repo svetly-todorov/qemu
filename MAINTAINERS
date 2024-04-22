@@ -2073,6 +2073,12 @@ F: hw/acpi/ghes.c
 F: include/hw/acpi/ghes.h
 F: docs/specs/acpi_hest_ghes.rst
 
+ACPI/RASF
+M: Jonathan Cameron <jonathan.cameron@huawei.com>
+S: Supported
+F: hw/acpi/rasf.c
+F: include/hw/acpi/rasf.h
+
 ppc4xx
 L: qemu-ppc@nongnu.org
 S: Orphan
