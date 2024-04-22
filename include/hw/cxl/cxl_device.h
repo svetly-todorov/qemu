@@ -14,6 +14,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/register.h"
 #include "hw/cxl/cxl_events.h"
+#include "qapi/qapi-commands-cxl.h"
 
 #include "hw/cxl/cxl_cpmu.h"
 /*
@@ -525,6 +526,22 @@ typedef struct CXLDCExtentGroup {
 } CXLDCExtentGroup;
 typedef QTAILQ_HEAD(, CXLDCExtentGroup) CXLDCExtentGroupList;
 
+/*
+ * CXL r3.1 Table 8-168: Add Dynamic Capacity Response Input Payload
+ * CXL r3.1 Table 8-170: Release Dynamic Capacity Input Payload
+ */
+typedef struct CXLUpdateDCExtentListInPl {
+    uint32_t num_entries_updated;
+    uint8_t flags;
+    uint8_t rsvd[3];
+    /* CXL r3.1 Table 8-169: Updated Extent */
+    struct {
+        uint64_t start_dpa;
+        uint64_t len;
+        uint8_t rsvd[8];
+    } QEMU_PACKED updated_entries[];
+} QEMU_PACKED CXLUpdateDCExtentListInPl;
+
 typedef struct CXLDCRegion {
     uint64_t base;       /* aligned to 256*MiB */
     uint64_t decode_len; /* aligned to 256*MiB */
@@ -635,6 +652,13 @@ struct CXLType3Class {
                                size_t *len_out,
                                CXLCCI *cci);
     bool (*mhd_access_valid)(PCIDevice *d, uint64_t addr, unsigned int size);
+    bool (*mhd_reserve_extents)(PCIDevice *d,
+                                CXLDCExtentRecordList *records,
+                                uint8_t rid);
+    bool (*mhd_accept_extents)(PCIDevice *d,
+                               CXLDCExtentGroupList *groups,
+                               CXLUpdateDCExtentListInPl *in);
+    bool (*mhd_release_extent)(PCIDevice *d, uint64_t dpa, uint64_t len);
 };
 
 struct CSWMBCCIDev {

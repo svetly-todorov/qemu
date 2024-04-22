@@ -2185,22 +2185,6 @@ void cxl_extent_group_list_delete_front(CXLDCExtentGroupList *list)
 }
 
 /*
- * CXL r3.1 Table 8-168: Add Dynamic Capacity Response Input Payload
- * CXL r3.1 Table 8-170: Release Dynamic Capacity Input Payload
- */
-typedef struct CXLUpdateDCExtentListInPl {
-    uint32_t num_entries_updated;
-    uint8_t flags;
-    uint8_t rsvd[3];
-    /* CXL r3.1 Table 8-169: Updated Extent */
-    struct {
-        uint64_t start_dpa;
-        uint64_t len;
-        uint8_t rsvd[8];
-    } QEMU_PACKED updated_entries[];
-} QEMU_PACKED CXLUpdateDCExtentListInPl;
-
-/*
  * For the extents in the extent list to operate, check whether they are valid
  * 1. The extent should be in the range of a valid DC region;
  * 2. The extent should not cross multiple regions;
@@ -2299,6 +2283,7 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
 {
     CXLUpdateDCExtentListInPl *in = (void *)payload_in;
     CXLType3Dev *ct3d = CXL_TYPE3(cci->d);
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     CXLDCExtentList *extent_list = &ct3d->dc.extents;
     uint32_t i;
     uint64_t dpa, len;
@@ -2317,11 +2302,13 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
 
     ret = cxl_detect_malformed_extent_list(ct3d, in);
     if (ret != CXL_MBOX_SUCCESS) {
+        /* TODO free the capacity associated with extents_pending in the MHD */
         return ret;
     }
 
     ret = cxl_dcd_add_dyn_cap_rsp_dry_run(ct3d, in);
     if (ret != CXL_MBOX_SUCCESS) {
+        /* TODO free the capacity associated with extents_pending in the MHD */
         return ret;
     }
 
@@ -2333,6 +2320,12 @@ static CXLRetCode cmd_dcd_add_dyn_cap_rsp(const struct cxl_cmd *cmd,
         ct3d->dc.total_extent_count += 1;
         ct3_set_region_block_backed(ct3d, dpa, len);
     }
+
+    if (cvc->mhd_accept_extents)
+        cvc->mhd_accept_extents(&ct3d->parent_obj,
+                                &ct3d->dc.extents_pending,
+                                in);
+
     /* Remove the first extent group in the pending list*/
     cxl_extent_group_list_delete_front(&ct3d->dc.extents_pending);
 
@@ -2366,6 +2359,7 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
         uint32_t *updated_list_size)
 {
     CXLDCExtent *ent, *ent_next;
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     uint64_t dpa, len;
     uint32_t i;
     int cnt_delta = 0;
@@ -2386,6 +2380,14 @@ static CXLRetCode cxl_dc_extent_release_dry_run(CXLType3Dev *ct3d,
             goto free_and_exit;
         }
 
+        /* In an MHD, check that this DPA range belongs to this host */
+        if (cvc->mhd_access_valid &&
+            !cvc->mhd_access_valid(&ct3d->parent_obj, dpa, len)) {
+            /* TODO: error code for when host does not own the req'd extent */
+            ret = CXL_MBOX_INVALID_PA;
+            goto free_and_exit;
+        }
+        
         /* After this point, extent overflow is the only error can happen */
         while (len > 0) {
             QTAILQ_FOREACH(ent, updated_list, node) {
@@ -2458,9 +2460,11 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
 {
     CXLUpdateDCExtentListInPl *in = (void *)payload_in;
     CXLType3Dev *ct3d = CXL_TYPE3(cci->d);
+    CXLType3Class *cvc = CXL_TYPE3_GET_CLASS(ct3d);
     CXLDCExtentList updated_list;
     CXLDCExtent *ent, *ent_next;
-    uint32_t updated_list_size;
+    uint32_t updated_list_size, i;
+    uint64_t dpa, len;
     CXLRetCode ret;
 
     if (in->num_entries_updated == 0) {
@@ -2476,6 +2480,15 @@ static CXLRetCode cmd_dcd_release_dyn_cap(const struct cxl_cmd *cmd,
                                         &updated_list_size);
     if (ret != CXL_MBOX_SUCCESS) {
         return ret;
+    }
+
+    /* Updated_entries contains the released extents. Free those in the MHD */
+    for (i = 0; cvc->mhd_release_extent && i < in->num_entries_updated; ++i) {
+        dpa = in->updated_entries[i].start_dpa;
+        len = in->updated_entries[i].len;
+
+        if (cvc->mhd_release_extent)
+            cvc->mhd_release_extent(&ct3d->parent_obj, dpa, len);
     }
 
     /*
